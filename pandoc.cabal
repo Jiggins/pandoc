@@ -431,6 +431,7 @@ library
                    Text.Pandoc.Writers.Muse,
                    Text.Pandoc.Writers.Math,
                    Text.Pandoc.Writers.Shared,
+                   Text.Pandoc.Writers.XWiki,
                    Text.Pandoc.Lua,
                    Text.Pandoc.PDF,
                    Text.Pandoc.UTF8,
