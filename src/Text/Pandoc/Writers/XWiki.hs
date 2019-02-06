@@ -3,17 +3,18 @@
 module Text.Pandoc.Writers.XWiki where
 
 import Control.Monad.Reader
-import Control.Monad.State.Strict
+-- import Control.Monad.State.Strict
 
 import Data.Default
 import Data.List (intercalate)
 import Data.Text (Text, pack, unpack)
+import Data.Monoid ((<>))
 
 import Text.Pandoc.Class (PandocMonad, report)
 import Text.Pandoc.Definition
 import Text.Pandoc.Logging( LogMessage(..) )
 import Text.Pandoc.Options
-import Text.Pandoc.Pretty (render)
+-- import Text.Pandoc.Pretty (render)
 import Text.Pandoc.Shared (linesToPara)
 import Text.Pandoc.XML (escapeStringForXML)
 
@@ -21,6 +22,10 @@ import Text.Pandoc.XML (escapeStringForXML)
 import Text.Pandoc.Class (PandocIO, runIOorExplode)
 import Text.Pandoc.Readers.Markdown
 import Text.Pandoc.Writers.Native
+import Control.Monad.State.Strict (StateT, evalStateT, gets, modify)
+
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
 
 data WriterState = WriterState {
     stOptions :: WriterOptions
@@ -37,7 +42,7 @@ type XWikiWriter m = ReaderT WriterReader (StateT WriterState m)
 writeXWiki :: PandocMonad m => WriterOptions -> Pandoc -> m Text
 writeXWiki opts document =
   let initialState = WriterState { stOptions = opts }
-      env = WriterReader { options = opts, listLevel = [], useTags = False }
+      env = WriterReader { options = opts, listLevel = "*", useTags = False }
     in evalStateT (runReaderT (pandocToXWiki document) env) initialState
 
 pandocToXWiki :: PandocMonad m => Pandoc -> XWikiWriter m Text
@@ -61,6 +66,56 @@ toXWiki = toWhatever writeXWiki
 toNative :: Text -> IO ()
 toNative = toWhatever writeNative
 
+-- writeWhatever :: PandocMonad m => WriterOptions -> XWikiWriter m Text -> m Text
+writeWhatever :: XWikiWriter PandocIO Text -> PandocIO Text
+writeWhatever what =
+  let initialState = WriterState { stOptions = def }
+      env = WriterReader { options = def, listLevel = [], useTags = False }
+    in evalStateT (runReaderT what env) initialState
+
+table :: Block
+table = Table [] [AlignDefault,AlignCenter,AlignRight] [0.0,0.0,0.0]
+        [[Plain [Str "Tables"]]
+        ,[Plain [Str "Are"]]
+        ,[Plain [Str "Cool"]]]
+        [[[Plain [Str "col",Space,Str "3",Space,Str "is"]]
+         ,[Plain [Str "right-aligned"]]
+         ,[Plain [Str "$1600"]]]
+        ,[[Plain [Str "col",Space,Str "2",Space,Str "is"]]
+         ,[Plain [Str "centered"]]
+         ,[Plain [Str "$12"]]]
+        ,[[Plain [Str "zebra",Space,Str "stripes"]]
+         ,[Plain [Str "are",Space,Str "neat"]]
+         ,[Plain [Str "$1"]]]]
+
+list :: Block
+list = BulletList
+       [[Plain [Str "Item",Space,Str "1"]]
+       ,[Plain [Str "Item",Space,Str "2"]
+         ,BulletList
+         [[Plain [Str "Sub",Space,Str "Item",Space,Str "1"]]
+         ,[Plain [Str "Sub",Space,Str "Item",Space,Str "2"]]]]]
+
+listBlocks :: [[Block]]
+listBlocks = [[Plain [Str "Item",Space,Str "1"]]
+             ,[Plain [Str "Item",Space,Str "2"]
+               ,BulletList
+               [[Plain [Str "Sub",Space,Str "Item",Space,Str "1"]]
+               ,[Plain [Str "Sub",Space,Str "Item",Space,Str "2"]]]]]
+
+
+splittab :: Block -> [TableCell]
+splittab (Table _ alignments widths headers rows) = headers
+
+hs :: [TableCell]
+hs = splittab table
+
+testBlock :: Block -> IO String
+testBlock block = fmap unpack . runIOorExplode .  writeWhatever . fmap T.pack $ blockListToXWiki [block] -- >>= Prelude.putStrLn . unpack
+
+testTable :: IO Text
+testTable = runIOorExplode .  writeWhatever . fmap T.pack $ (blockListToXWiki [list])
+
 escapeString :: String -> String
 escapeString =  escapeStringForXML
 
@@ -80,22 +135,18 @@ blockToXWiki :: PandocMonad m
              -> XWikiWriter m String
 blockToXWiki (Plain inlines) = inlineListToXWiki inlines
 
-blockToXWiki (Para inlines) = do
-  tags     <- asks useTags
-  level    <- asks listLevel
-  contents <- inlineListToXWiki inlines
-  return $ if tags
-              then "<p>\n" ++ contents ++ "\n</p>"
-              else contents
+blockToXWiki (Para inlines) =
+  surround "\n" <$> inlineListToXWiki inlines
 
 blockToXWiki (LineBlock lines) = blockToXWiki $ linesToPara lines
 
 blockToXWiki (CodeBlock (_, languages, _) code) = do
   return $ "{{code language=\"" ++ unwords languages ++ "\"}}" ++ "\n"
          ++ code ++ "\n"
-         ++ "{{/code}"
+         ++ "{{/code}}\n"
 
 blockToXWiki block@(RawBlock format str)
+  | format == Format "mediawiki" = return str
   | format == Format "xwiki" = return str
   | format == Format "html"  = return str
   | otherwise                = "" <$ report (BlockNotRendered block)
@@ -113,12 +164,15 @@ blockToXWiki (BlockQuote blocks) =
 
 blockToXWiki (OrderedList listAttributes blocks) = undefined
 
-blockToXWiki (BulletList blocks) = do
-  lev <- asks listLevel
-  contents <- local (\s -> s { listLevel = listLevel s ++ "*" }) $ mapM blockListToXWiki blocks
-  return $ intercalate "\n" contents ++ if null lev then "\n" else ""
+blockToXWiki (BulletList blocks) =
+  (intercalate "\n" . map ("* " ++)) <$> mapM blockListToXWiki blocks
 
-blockToXWiki (DefinitionList definitions) =        undefined
+  -- lev <- asks listLevel
+  -- contents <- local (\s -> s { listLevel = listLevel s ++ "*" }) $ mapM blockListToXWiki blocks
+  -- return $ intercalate "\n" contents ++ if null lev then "\n" else ""
+
+-- http://www.xwiki.org/xwiki/bin/view/Documentation/UserGuide/Features/XWikiSyntax/?syntax=2.1&section=DefinitionLists
+blockToXWiki (DefinitionList definitions) = undefined
 
 blockToXWiki (Header level _ inlines) = do
   contents <- inlineListToXWiki inlines
@@ -133,26 +187,11 @@ blockToXWiki HorizontalRule = return "\n----\n"
 --                   [TableCell]
 --                   [[TableCell]]
 
--- [Table [] [AlignDefault,AlignCenter,AlignRight] [0.0,0.0,0.0]
---  [[Plain [Str "Tables"]]
---  ,[Plain [Str "Are"]]
---  ,[Plain [Str "Cool"]]]
---  [[[Plain [Str "col",Space,Str "3",Space,Str "is"]]
---   ,[Plain [Str "right-aligned"]]
---   ,[Plain [Str "$1600"]]]
---  ,[[Plain [Str "col",Space,Str "2",Space,Str "is"]]
---   ,[Plain [Str "centered"]]
---   ,[Plain [Str "$12"]]]
---  ,[[Plain [Str "zebra",Space,Str "stripes"]]
---   ,[Plain [Str "are",Space,Str "neat"]]
---   ,[Plain [Str "$1"]]]]]
-
 -- XWiki does not support Table captions
--- blockToXWiki (Table _ alignments widths headers rows) = do
---   let header  = ('|':) . intercalate "|" . map ('=':) <$> blockListToXWiki headers
---       makerow = map (\b -> ("| " ++) <$> blockToXWiki b)
---       newrows = map makerow rows
---   return header
+blockToXWiki (Table _ alignments widths headers rows) = do
+  header <- concat <$> mapM (\h -> ("|=" ++) <$> blockListToXWiki h) headers
+  body   <- forM rows (\row -> concat <$> mapM (\c -> ("|"  ++) <$> blockListToXWiki c) row)
+  return . intercalate "\n" $ header : body
 
 blockToXWiki (Div attr blocks) = undefined
 blockToXWiki Null = return ""
@@ -196,7 +235,7 @@ inlineToXWiki (Quoted DoubleQuote lst) = do
 
 inlineToXWiki (Cite _  lst) = inlineListToXWiki lst
 
-inlineToXWiki (Str str) = return $ escapeString str
+inlineToXWiki (Str str) = return $ str
 
 inlineToXWiki (Math mt str) = return $
   "<math display=\"" ++
